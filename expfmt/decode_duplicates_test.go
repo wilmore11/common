@@ -105,16 +105,88 @@ func TestDecoderDuplicateBucketsAndQuantiles(t *testing.T) {
 					if tc.wantErr != "" {
 						require.ErrorContains(t, err, tc.wantErr)
 						require.ErrorContains(t, err, `metric family "request_duration_seconds"`)
+						if input.format == FmtText {
+							require.ErrorContains(t, dec.Decode(&got), tc.wantErr)
+						} else {
+							require.ErrorIs(t, dec.Decode(&got), io.EOF)
+						}
 					} else {
 						require.NoError(t, err)
 						require.Len(t, got.GetMetric(), 1)
-						if input.format == FmtProtoDelim {
-							require.True(t, proto.Equal(family, &got))
-						}
+						require.True(t, proto.Equal(family, &got))
+						require.ErrorIs(t, dec.Decode(&got), io.EOF)
 					}
-					require.ErrorIs(t, dec.Decode(&got), io.EOF)
 				})
 			}
+		})
+	}
+}
+
+func TestDuplicateNaNValuesAreRejected(t *testing.T) {
+	for _, metricType := range []dto.MetricType{dto.MetricType_HISTOGRAM, dto.MetricType_SUMMARY} {
+		t.Run(metricType.String(), func(t *testing.T) {
+			family := duplicateTestFamily(metricType, []float64{math.NaN(), math.NaN()})
+			var data bytes.Buffer
+			_, err := protodelim.MarshalTo(&data, family)
+			require.NoError(t, err)
+
+			dec := NewDecoder(bytes.NewReader(data.Bytes()), FmtProtoDelim)
+			var got dto.MetricFamily
+			require.ErrorContains(t, dec.Decode(&got), "duplicate")
+
+			_, err = ExtractSamples(&DecodeOptions{}, family)
+			require.ErrorContains(t, err, "duplicate")
+		})
+	}
+}
+
+func TestTextParserRejectsDuplicateBucketsAndQuantiles(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "histogram",
+			text: "# TYPE request_duration_seconds histogram\n" +
+				"request_duration_seconds_bucket{le=\"1\"} 2\n" +
+				"request_duration_seconds_bucket{le=\"1\"} 3\n" +
+				"request_duration_seconds_sum 4\n" +
+				"request_duration_seconds_count 3\n",
+			want: "duplicate bucket upper bound 1",
+		},
+		{
+			name: "summary",
+			text: "# TYPE request_duration_seconds summary\n" +
+				"request_duration_seconds{quantile=\"0.5\"} 2\n" +
+				"request_duration_seconds{quantile=\"0.5\"} 3\n" +
+				"request_duration_seconds_sum 4\n" +
+				"request_duration_seconds_count 3\n",
+			want: "duplicate quantile 0.5",
+		},
+		{
+			name: "gauge histogram",
+			text: "# TYPE request_duration_seconds gaugehistogram\n" +
+				"request_duration_seconds_bucket{le=\"1\"} 2\n" +
+				"request_duration_seconds_bucket{le=\"1\"} 3\n" +
+				"request_duration_seconds_sum 4\n" +
+				"request_duration_seconds_count 3\n",
+			want: "duplicate bucket upper bound 1",
+		},
+		{
+			name: "signed zero",
+			text: "# TYPE request_duration_seconds histogram\n" +
+				"request_duration_seconds_bucket{le=\"0\"} 2\n" +
+				"request_duration_seconds_bucket{le=\"-0\"} 3\n" +
+				"request_duration_seconds_sum 4\n" +
+				"request_duration_seconds_count 3\n",
+			want: "duplicate bucket upper bound -0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parser := NewTextParser(model.LegacyValidation)
+			_, err := parser.TextToMetricFamilies(strings.NewReader(tc.text))
+			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }

@@ -170,23 +170,47 @@ func (d *protoDecoder) Decode(v *dto.MetricFamily) error {
 // Checking after parsing covers both text and protobuf input without reordering
 // or modifying the decoded data.
 func checkDuplicateBucketsAndQuantiles(f *dto.MetricFamily) error {
-	for _, metric := range f.GetMetric() {
-		switch f.GetType() {
-		case dto.MetricType_HISTOGRAM, dto.MetricType_GAUGE_HISTOGRAM:
+	switch f.GetType() {
+	case dto.MetricType_HISTOGRAM, dto.MetricType_GAUGE_HISTOGRAM:
+		for _, metric := range f.GetMetric() {
 			buckets := metric.GetHistogram().GetBucket()
+			if len(buckets) <= 1 {
+				continue
+			}
 			seen := make(map[float64]struct{}, len(buckets))
+			nanSeen := false
 			for _, bucket := range buckets {
 				bound := bucket.GetUpperBound()
+				if math.IsNaN(bound) {
+					if nanSeen {
+						return fmt.Errorf("metric family %q has duplicate bucket upper bound %v", f.GetName(), bound)
+					}
+					nanSeen = true
+					continue
+				}
 				if _, exists := seen[bound]; exists {
 					return fmt.Errorf("metric family %q has duplicate bucket upper bound %v", f.GetName(), bound)
 				}
 				seen[bound] = struct{}{}
 			}
-		case dto.MetricType_SUMMARY:
+		}
+	case dto.MetricType_SUMMARY:
+		for _, metric := range f.GetMetric() {
 			quantiles := metric.GetSummary().GetQuantile()
+			if len(quantiles) <= 1 {
+				continue
+			}
 			seen := make(map[float64]struct{}, len(quantiles))
+			nanSeen := false
 			for _, quantile := range quantiles {
 				value := quantile.GetQuantile()
+				if math.IsNaN(value) {
+					if nanSeen {
+						return fmt.Errorf("metric family %q has duplicate quantile %v", f.GetName(), value)
+					}
+					nanSeen = true
+					continue
+				}
 				if _, exists := seen[value]; exists {
 					return fmt.Errorf("metric family %q has duplicate quantile %v", f.GetName(), value)
 				}
